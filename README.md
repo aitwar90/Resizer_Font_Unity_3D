@@ -1,6 +1,4 @@
 # Resizer_Font_Unity_3D
-Resizer fonts Unity 3D
-# Resizer_Font_Unity_3D
 
 Based on: https://gist.github.com/nukadelic/47474c7e5d4ee5909462e3b900f4cb82
 
