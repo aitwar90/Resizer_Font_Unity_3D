@@ -4,7 +4,7 @@ Resizer fonts Unity 3D
 
 Based on: https://gist.github.com/nukadelic/47474c7e5d4ee5909462e3b900f4cb82
 
-Zestaw zaawansowanych skryptów edytorskich w języku C# przeznaczonych do dynamicznego skalowania oraz naprawy błędów wyświetlania czcionek w **Unity Editor**. Narzędzia zostały zaprojektowane specjalnie z myślą o programistach pracujących w środowiskach **Linux** (np. Linux Mint / Ubuntu) oraz na monitorach o wysokiej rozdzielczości (**HiDPI/4K**), gdzie domyślny mechanizm skalowania interfejsu Unity często zawodzi, czyniąc napisy mikroskopijnymi lub nieczytelnymi.
+Zestaw zaawansowanych skryptów edytorskich w języku C# przeznaczonych do dynamicznego skalowania oraz naprawy błędów wyświetlania czcionek w **Unity Editor**. Narzędzia zostały zaprojektowane specjalnie z myślą o programistach pracujących w środowiskach **Linux** (np. Linux Mint / Ubuntu) oraz na monitorach o wysokiej rozdzielczości (**HiDPI/4K**), gdzie domyślny mechanizm skalowania interfejsu Unity nie istnieje, czyniąc napisy mikroskopijnymi lub nieczytelnymi.
 
 ## 🛠️ Zawartość zestawu
 
