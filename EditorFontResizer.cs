@@ -23,12 +23,12 @@ public class EditorFontResizer : EditorWindow
 
     private class StyleInfo
     {
-        public string name;
-        private GUIStyle _style;
+        public readonly string name;
+        private readonly GUIStyle _style;
 
         public int FontSize
         {
-            get => _config.ContainsKey(name) ? _config[name] : (_style != null ? _style.fontSize : 12);
+            get => _config.TryGetValue(name, out int val) ? val : (_style != null ? _style.fontSize : 12);
             set
             {
                 if (value > 0)
@@ -82,6 +82,10 @@ public class EditorFontResizer : EditorWindow
     private int _uitoolkitFontSize = 13;
     private bool _initialized;
 
+    // OPTYMALIZACJA: Cache czasu dla odpychania UI Toolkit
+    private double _lastScaleTime;
+    private const double ScaleInterval = 0.5; // Odświeżaj UI Toolkit max 2 razy na sekundę zamiast 60-144 razy!
+
     private void OnEnable()
     {
         _config = ReadDictionary(ConfigPath);
@@ -91,12 +95,12 @@ public class EditorFontResizer : EditorWindow
         }
 
         _initialized = false;
-        EditorApplication.update += ContinuousUIToolkitScale;
+        EditorApplication.update += ThrottledUIToolkitScale;
     }
 
     private void OnDisable()
     {
-        EditorApplication.update -= ContinuousUIToolkitScale;
+        EditorApplication.update -= ThrottledUIToolkitScale;
         SaveConfig();
     }
 
@@ -129,30 +133,35 @@ public class EditorFontResizer : EditorWindow
 
         _editorStyles = new List<StyleInfo>();
         var flags = BindingFlags.Static | BindingFlags.Public | BindingFlags.GetProperty;
-        foreach (var x in typeof(EditorStyles).GetProperties(flags))
+        
+        PropertyInfo[] editorProperties = typeof(EditorStyles).GetProperties(flags);
+        for (int i = 0; i < editorProperties.Length; i++)
         {
-            var s = TryGetGUIStyle(x, null);
+            var s = TryGetGUIStyle(editorProperties[i], null);
             if (s == null || trackedStyles.Contains(s)) continue;
 
             trackedStyles.Add(s);
-            _editorStyles.Add(new StyleInfo("editor." + x.Name, s));
+            _editorStyles.Add(new StyleInfo("editor." + editorProperties[i].Name, s));
         }
 
-        _guiStyles = new List<StyleInfo>();
         if (GUI.skin != null)
         {
-            foreach (var x in GUI.skin.GetType().GetProperties())
+            _guiStyles = new List<StyleInfo>();
+            PropertyInfo[] guiProperties = GUI.skin.GetType().GetProperties();
+            for (int i = 0; i < guiProperties.Length; i++)
             {
-                var s = TryGetGUIStyle(x, GUI.skin);
+                var s = TryGetGUIStyle(guiProperties[i], GUI.skin);
                 if (s == null || trackedStyles.Contains(s)) continue;
 
                 trackedStyles.Add(s);
-                _guiStyles.Add(new StyleInfo("gui." + x.Name, s));
+                _guiStyles.Add(new StyleInfo("gui." + guiProperties[i].Name, s));
             }
 
             _customStyles = new List<StyleInfo>();
-            foreach (var s in GUI.skin.customStyles)
+            GUIStyle[] custom = GUI.skin.customStyles;
+            for (int i = 0; i < custom.Length; i++)
             {
+                var s = custom[i];
                 if (s == null || string.IsNullOrEmpty(s.name) || trackedStyles.Contains(s)) continue;
 
                 trackedStyles.Add(s);
@@ -168,13 +177,13 @@ public class EditorFontResizer : EditorWindow
                 "TV LineBold", "ProjectBrowserHeaderBgComment"
             };
 
-            foreach (var styleName in hiddenProjectStyles)
+            for (int i = 0; i < hiddenProjectStyles.Length; i++)
             {
-                GUIStyle s = GUI.skin.FindStyle(styleName);
+                GUIStyle s = GUI.skin.FindStyle(hiddenProjectStyles[i]);
                 if (s != null && !trackedStyles.Contains(s))
                 {
                     trackedStyles.Add(s);
-                    _customStyles.Add(new StyleInfo("custom." + styleName, s));
+                    _customStyles.Add(new StyleInfo("custom." + hiddenProjectStyles[i], s));
                 }
             }
         }
@@ -184,7 +193,7 @@ public class EditorFontResizer : EditorWindow
 
     private GUIStyle TryGetGUIStyle(PropertyInfo x, object item)
     {
-        if (string.IsNullOrEmpty(x.Name) || x.PropertyType != typeof(GUIStyle)) return null;
+        if (x.PropertyType != typeof(GUIStyle)) return null;
 
         try
         {
@@ -244,56 +253,54 @@ public class EditorFontResizer : EditorWindow
     }
 
     /// <summary>
-    /// Bezpośrednie skalowanie w strukturze VisualElement (bez udziału pliku USS z dysku)
+    /// OPTYMALIZACJA: Ograniczenie częstotliwości skanowania UI z 60-144 FPS do 2 razy na sekundę (Throttling).
+    /// Eliminujemy ścinanie edytora i GC Spike na słabszych laptopach.
     /// </summary>
-    private void ContinuousUIToolkitScale()
+    private void ThrottledUIToolkitScale()
     {
-        ApplyUIToolkitFontScalingDirect();
+        double currentTime = EditorApplication.timeSinceStartup;
+        if (currentTime - _lastScaleTime >= ScaleInterval)
+        {
+            _lastScaleTime = currentTime;
+            ApplyUIToolkitFontScalingDirect();
+        }
     }
 
     private void ApplyUIToolkitFontScalingDirect()
     {
-        foreach (var window in Resources.FindObjectsOfTypeAll<EditorWindow>())
+        EditorWindow[] windows = Resources.FindObjectsOfTypeAll<EditorWindow>();
+        for (int i = 0; i < windows.Length; i++)
         {
+            EditorWindow window = windows[i];
             if (window == null || window.rootVisualElement == null) continue;
 
-            // Szybka zmiana stylu w głębi drzewa domyślnego dla elementów tekstowych
-            var labels = window.rootVisualElement.Query<Label>().Build();
-            foreach (var label in labels)
-            {
-                label.style.fontSize = _uitoolkitFontSize;
-            }
+            VisualElement root = window.rootVisualElement;
 
-            var buttons = window.rootVisualElement.Query<Button>().Build();
-            foreach (var btn in buttons)
-            {
-                btn.style.fontSize = _uitoolkitFontSize;
-            }
-
-            var textElements = window.rootVisualElement.Query(className: "unity-text-element").Build();
-            foreach (var txt in textElements)
-            {
-                txt.style.fontSize = _uitoolkitFontSize;
-            }
+            // Zamiast tworzyć listy przez .Build(), bezpośrednio po obiekcie
+            root.Query<Label>().ForEach(l => l.style.fontSize = _uitoolkitFontSize);
+            root.Query<Button>().ForEach(b => b.style.fontSize = _uitoolkitFontSize);
+            root.Query(className: "unity-text-element").ForEach(t => t.style.fontSize = _uitoolkitFontSize);
         }
     }
 
     private static void RepaintAllWindows()
     {
-        foreach (var w in Resources.FindObjectsOfTypeAll<EditorWindow>())
+        EditorWindow[] windows = Resources.FindObjectsOfTypeAll<EditorWindow>();
+        for (int i = 0; i < windows.Length; i++)
         {
-            w.Repaint();
+            windows[i].Repaint();
         }
     }
 
     private bool Header(string name)
     {
-        if (!_foldouts.ContainsKey(name))
+        if (!_foldouts.TryGetValue(name, out bool val))
         {
+            val = true;
             _foldouts.Add(name, true);
         }
         GUILayout.Space(5);
-        bool foldout = EditorGUILayout.Foldout(!_foldouts[name], name, true);
+        bool foldout = EditorGUILayout.Foldout(!val, name, true);
         _foldouts[name] = !foldout;
         return foldout;
     }
@@ -310,8 +317,8 @@ public class EditorFontResizer : EditorWindow
 
     private int DrawRow(string name, string size, GUIStyle style)
     {
-        var width = GUILayout.MaxWidth(EditorGUIUtility.currentViewWidth);
-        using (new GUILayout.HorizontalScope(style, width))
+        float viewWidth = EditorGUIUtility.currentViewWidth;
+        using (new GUILayout.HorizontalScope(style, GUILayout.MaxWidth(viewWidth)))
         {
             GUILayout.Label(name);
             GUILayout.FlexibleSpace();
@@ -366,39 +373,39 @@ public class EditorFontResizer : EditorWindow
             GUILayout.Space(10);
             GUILayout.Label("Legacy IMGUI Styles", EditorStyles.boldLabel);
 
-            if (_config.ContainsKey("editor.miniLabel"))
+            if (_config.TryGetValue("editor.miniLabel", out int miniLabelSize))
             {
-                int delta = DrawRow("Global IMGUI Zoom", _config["editor.miniLabel"].ToString(), _oddBG);
+                int delta = DrawRow("Global IMGUI Zoom", miniLabelSize.ToString(), _oddBG);
                 if (delta != 0)
                 {
-                    if (_editorStyles != null) foreach (var style in _editorStyles) style.FontSize += delta;
-                    if (_guiStyles != null) foreach (var style in _guiStyles) style.FontSize += delta;
-                    if (_customStyles != null) foreach (var style in _customStyles) style.FontSize += delta;
+                    if (_editorStyles != null) for (int i = 0; i < _editorStyles.Count; i++) _editorStyles[i].FontSize += delta;
+                    if (_guiStyles != null) for (int i = 0; i < _guiStyles.Count; i++) _guiStyles[i].FontSize += delta;
+                    if (_customStyles != null) for (int i = 0; i < _customStyles.Count; i++) _customStyles[i].FontSize += delta;
                     ApplyChanges();
                 }
             }
 
             if (_editorStyles != null && Header("Editor Styles"))
             {
-                foreach (var style in _editorStyles)
+                for (int i = 0; i < _editorStyles.Count; i++)
                 {
-                    FontSizeRow(style, rowCount % 2 == 0);
+                    FontSizeRow(_editorStyles[i], rowCount % 2 == 0);
                     ++rowCount;
                 }
             }
             if (_guiStyles != null && Header("GUI Skins"))
             {
-                foreach (var style in _guiStyles)
+                for (int i = 0; i < _guiStyles.Count; i++)
                 {
-                    FontSizeRow(style, rowCount % 2 == 0);
+                    FontSizeRow(_guiStyles[i], rowCount % 2 == 0);
                     ++rowCount;
                 }
             }
             if (_customStyles != null && Header("Custom Styles"))
             {
-                foreach (var style in _customStyles)
+                for (int i = 0; i < _customStyles.Count; i++)
                 {
-                    FontSizeRow(style, rowCount % 2 == 0);
+                    FontSizeRow(_customStyles[i], rowCount % 2 == 0);
                     ++rowCount;
                 }
             }
