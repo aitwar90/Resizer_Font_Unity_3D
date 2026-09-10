@@ -1,157 +1,227 @@
 #if UNITY_EDITOR
 
+using System;
 using System.Collections.Generic;
-using UnityEngine;
-using UnityEditor;
-using System.Reflection;
 using System.IO;
+using System.Reflection;
 using System.Text;
+using UnityEditor;
+using UnityEngine;
+using UnityEngine.UIElements;
 
 public class EditorFontResizer : EditorWindow
 {
-
     [MenuItem("Window/Editor Font Resizer")]
-    static void Open() => GetWindow<EditorFontResizer>("Editor Font Resizer").minSize = new Vector2(180f, 10f);
+    public static void Open()
+    {
+        var win = GetWindow<EditorFontResizer>("Editor Font Resizer");
+        win.minSize = new Vector2(250f, 150f);
+    }
 
-    const string _configPath = "EditorFontResizer.cfg";
-    static Dictionary<string, int> _config;
+    private const string ConfigPath = "EditorFontResizer.cfg";
+    private static Dictionary<string, int> _config = new Dictionary<string, int>();
 
-    class StyleInfo
+    private class StyleInfo
     {
         public string name;
-        GUIStyle _style;
+        private GUIStyle _style;
 
         public int FontSize
         {
-            get => _config[name];
+            get => _config.ContainsKey(name) ? _config[name] : (_style != null ? _style.fontSize : 12);
             set
             {
                 if (value > 0)
                 {
-                    _config[name] = _style.fontSize = value;
+                    _config[name] = value;
+                    if (_style != null)
+                    {
+                        _style.fontSize = value;
+                    }
                 }
             }
         }
 
-        public StyleInfo(string _name, GUIStyle __style)
+        public StyleInfo(string name, GUIStyle style)
         {
-            name = _name;
-            _style = __style;
-            InitSize(_style);
-            InitAlignment(_style);
-            // Uncomment to disable text being cut off when it does not fit (not recommended)
-            // InitClipping(_style);
+            this.name = name;
+            _style = style;
+            InitSize();
         }
 
-        void InitSize(GUIStyle style)
+        private void InitSize()
         {
-            if (style.fontSize == 0)
+            int defaultSize = 12;
+            if (_style != null)
             {
-                style.fontSize = GUI.skin.font.fontSize;
+                if (_style.fontSize > 0) defaultSize = _style.fontSize;
+                else if (GUI.skin != null && GUI.skin.font != null) defaultSize = GUI.skin.font.fontSize;
             }
-            if (_config.ContainsKey(name))
+
+            if (!_config.ContainsKey(name))
             {
-                style.fontSize = _config[name];
+                _config.Add(name, defaultSize);
             }
-            else
+            
+            if (_style != null)
             {
-                _config.Add(name, style.fontSize);
+                _style.fontSize = _config[name];
             }
         }
+    }
 
-        void InitAlignment(GUIStyle style)
+    private List<StyleInfo> _editorStyles;
+    private List<StyleInfo> _guiStyles;
+    private List<StyleInfo> _customStyles;
+
+    private readonly Dictionary<string, bool> _foldouts = new Dictionary<string, bool>();
+    private GUIStyle _evenBG;
+    private GUIStyle _oddBG;
+    private Vector2 _scroll;
+
+    private int _uitoolkitFontSize = 13;
+    private bool _initialized;
+
+    private void OnEnable()
+    {
+        _config = ReadDictionary(ConfigPath);
+        if (_config.TryGetValue("uitoolkit.globalFontSize", out int savedUITSize))
         {
-            if (!style.wordWrap)
+            _uitoolkitFontSize = savedUITSize;
+        }
+
+        _initialized = false;
+        EditorApplication.update += ContinuousUIToolkitScale;
+    }
+
+    private void OnDisable()
+    {
+        EditorApplication.update -= ContinuousUIToolkitScale;
+        SaveConfig();
+    }
+
+    private void InitStyles()
+    {
+        if (_evenBG != null) return;
+
+        _evenBG = new GUIStyle("CN EntryBackEven")
+        {
+            contentOffset = Vector2.zero,
+            clipping = TextClipping.Clip,
+            margin = new RectOffset(),
+            padding = new RectOffset()
+        };
+
+        _oddBG = new GUIStyle("CN EntryBackOdd")
+        {
+            contentOffset = Vector2.zero,
+            clipping = TextClipping.Clip,
+            margin = new RectOffset(),
+            padding = new RectOffset()
+        };
+    }
+
+    private void InitProperties()
+    {
+        if (_initialized) return;
+
+        var trackedStyles = new HashSet<GUIStyle>();
+
+        _editorStyles = new List<StyleInfo>();
+        var flags = BindingFlags.Static | BindingFlags.Public | BindingFlags.GetProperty;
+        foreach (var x in typeof(EditorStyles).GetProperties(flags))
+        {
+            var s = TryGetGUIStyle(x, null);
+            if (s == null || trackedStyles.Contains(s)) continue;
+
+            trackedStyles.Add(s);
+            _editorStyles.Add(new StyleInfo("editor." + x.Name, s));
+        }
+
+        _guiStyles = new List<StyleInfo>();
+        if (GUI.skin != null)
+        {
+            foreach (var x in GUI.skin.GetType().GetProperties())
             {
-                switch (style.alignment)
+                var s = TryGetGUIStyle(x, GUI.skin);
+                if (s == null || trackedStyles.Contains(s)) continue;
+
+                trackedStyles.Add(s);
+                _guiStyles.Add(new StyleInfo("gui." + x.Name, s));
+            }
+
+            _customStyles = new List<StyleInfo>();
+            foreach (var s in GUI.skin.customStyles)
+            {
+                if (s == null || string.IsNullOrEmpty(s.name) || trackedStyles.Contains(s)) continue;
+
+                trackedStyles.Add(s);
+                _customStyles.Add(new StyleInfo("custom." + s.name, s));
+            }
+
+            string[] hiddenProjectStyles = {
+                "ProjectBrowserGridLabel", "PR Label", "TV Line", "ControlLabel",
+                "ObjectField", "ObjectFieldThumb", "TextField", "NumberField",
+                "LayerMaskField", "IN TitleText", "VariableField", "miniLabel",
+                "ExposedParameterText", "HeaderLabel", "Foldout", "WordWrappedLabel",
+                "MiniLabel", "CN Message", "SearchTextField", "TV Selection",
+                "TV LineBold", "ProjectBrowserHeaderBgComment"
+            };
+
+            foreach (var styleName in hiddenProjectStyles)
+            {
+                GUIStyle s = GUI.skin.FindStyle(styleName);
+                if (s != null && !trackedStyles.Contains(s))
                 {
-                    case TextAnchor.LowerLeft:
-                    case TextAnchor.UpperLeft:
-                        style.alignment = TextAnchor.MiddleLeft;
-                        break;
-                    case TextAnchor.LowerRight:
-                    case TextAnchor.UpperRight:
-                        style.alignment = TextAnchor.MiddleRight;
-                        break;
-                    case TextAnchor.LowerCenter:
-                    case TextAnchor.UpperCenter:
-                        style.alignment = TextAnchor.MiddleCenter;
-                        break;
+                    trackedStyles.Add(s);
+                    _customStyles.Add(new StyleInfo("custom." + styleName, s));
                 }
             }
         }
 
-        void InitClipping(GUIStyle style)
-        {
-            style.clipping = TextClipping.Overflow;
-        }
+        _initialized = true;
     }
 
-    List<StyleInfo> _editorStyles;
-    List<StyleInfo> _guiStyles;
-    List<StyleInfo> _customStyles;
-
-    Dictionary<string, bool> _foldouts = new Dictionary<string, bool>();
-
-    GUIStyle _evenBG;
-    GUIStyle _oddBG;
-
-    Vector2 _scroll;
-
-    void InitStyles()
+    private GUIStyle TryGetGUIStyle(PropertyInfo x, object item)
     {
-        if (_evenBG != null)
+        if (string.IsNullOrEmpty(x.Name) || x.PropertyType != typeof(GUIStyle)) return null;
+
+        try
         {
-            return;
+            return (GUIStyle)x.GetValue(item, null);
         }
-        GUIStyle s = "CN EntryBackEven";
-        _evenBG = new GUIStyle(s);
-        s = "CN EntryBackOdd";
-        _oddBG = new GUIStyle(s);
-        _evenBG.contentOffset = _oddBG.contentOffset = Vector2.zero;
-        _evenBG.clipping = _oddBG.clipping = TextClipping.Clip;
-        _evenBG.margin = _oddBG.margin =
-        _evenBG.padding = _oddBG.padding = new RectOffset();
-    }
-
-    GUIStyle TryGetGUIStyle(PropertyInfo x, object item)
-    {
-        if (string.IsNullOrEmpty(x.Name) || x.PropertyType != typeof(GUIStyle))
+        catch
         {
             return null;
         }
-        return (GUIStyle)x.GetValue(item, null);
     }
 
-    bool ValidFontStyle(GUIStyle s)
+    private static Dictionary<string, int> ReadDictionary(string path)
     {
-        return s != null && !string.IsNullOrEmpty(s.name);
-    }
+        var dict = new Dictionary<string, int>();
+        var fileInfo = new FileInfo(path);
+        if (!fileInfo.Exists) return dict;
 
-    Dictionary<string, int> ReadDictionary(string path)
-    {
-        Dictionary<string, int> dict = new Dictionary<string, int>();
-        FileInfo fileInfo = new FileInfo(path);
-        if (fileInfo.Exists)
+        using (var fileStream = fileInfo.OpenRead())
+        using (var reader = new StreamReader(fileStream, Encoding.UTF8))
         {
-            using (FileStream fileStream = fileInfo.OpenRead())
+            while (!reader.EndOfStream)
             {
-                using (StreamReader reader = new StreamReader(fileStream, Encoding.UTF8))
+                string line = reader.ReadLine();
+                if (string.IsNullOrEmpty(line)) continue;
+                string[] pair = line.Split(':');
+                if (pair.Length == 2 && int.TryParse(pair[1], out int val))
                 {
-                    while (!reader.EndOfStream)
-                    {
-                        string[] pair = reader.ReadLine().Split(':');
-                        dict[pair[0]] = int.Parse(pair[1]);
-                    }
+                    dict[pair[0]] = val;
                 }
             }
         }
         return dict;
     }
 
-    void WriteDictionary(Dictionary<string, int> dict, string path)
+    private static void WriteDictionary(Dictionary<string, int> dict, string path)
     {
-        using (StreamWriter file = new StreamWriter(path))
+        using (var file = new StreamWriter(path, false, Encoding.UTF8))
         {
             foreach (var pair in dict)
             {
@@ -160,95 +230,55 @@ public class EditorFontResizer : EditorWindow
         }
     }
 
-    void InitProperties()
+    private void SaveConfig()
     {
-        if (_editorStyles != null && _guiStyles != null && _customStyles != null)
-        {
-            return;
-        }
-
-        var trackedStyles = new HashSet<GUIStyle>();
-        _config = ReadDictionary(_configPath);
-
-        _editorStyles = new List<StyleInfo>();
-        var flags = BindingFlags.Static | BindingFlags.Public | BindingFlags.GetProperty;
-        foreach (var x in typeof(EditorStyles).GetProperties(flags))
-        {
-            var s = TryGetGUIStyle(x, null);
-            if (s == null || trackedStyles.Contains(s))
-            {
-                continue;
-            }
-            trackedStyles.Add(s);
-            _editorStyles.Add(new StyleInfo("editor." + x.Name, s));
-        }
-
-        _guiStyles = new List<StyleInfo>();
-        foreach (var x in GUI.skin.GetType().GetProperties())
-        {
-            var s = TryGetGUIStyle(x, GUI.skin);
-            if (s == null || trackedStyles.Contains(s))
-            {
-                continue;
-            }
-            trackedStyles.Add(s);
-            _guiStyles.Add(new StyleInfo("gui." + x.Name, s));
-        }
-
-        _customStyles = new List<StyleInfo>();
-        foreach (var s in GUI.skin.customStyles)
-        {
-            if (!ValidFontStyle(s) || trackedStyles.Contains(s))
-            {
-                continue;
-            }
-            trackedStyles.Add(s);
-            _customStyles.Add(new StyleInfo("custom." + s.name, s));
-        }
-        // --- NOWA CZĘŚĆ: Ręczne dodawanie ukrytych stylów okna Project ---
-        string[] hiddenProjectStyles = {
-            // Okno Project i Hierarchy
-            "ProjectBrowserGridLabel",
-            "PR Label",
-            "TV Line",
-            
-            // Inspektor i Twoje skrypty
-            "ControlLabel",      // Nazwy Twoich zmiennych
-            "ObjectField",          // Ramki na assety (np. Material, Texture)
-            "ObjectFieldThumb",     // Miniaturki w polach obiektów
-            "TextField",            // Pola tekstowe (string)
-            "NumberField",          // Pola liczbowe (int, float)
-            "LayerMaskField",       // Wybór warstw
-            "IN TitleText",         // Tekst w nagłówku komponentu
-            "VariableField",        // Ogólne pole zmiennej
-            "miniLabel",            // Małe napisy pod polami
-            "ExposedParameterText",  // Parametry w niektórych komponentach
-            "HeaderLabel",       // Atrybut [Header]
-            "Foldout",           // Rozwijane listy (List<>) i struktury
-            "WordWrappedLabel",  // Dłuższe teksty w inspektorze
-            "MiniLabel",         // Podpowiedzi i mniejsze opisy
-            "TextField",         // Pola tekstowe w Twoich skryptach
-            "NumberField",       // Pola liczbowe
-            
-            // Konsola
-            "CN Message",
-            //"LogDetails"
-        };
-        foreach (var styleName in hiddenProjectStyles)
-        {
-            // Używamy FindStyle, aby uniknąć błędów, jeśli styl nie jest załadowany
-            GUIStyle s = GUI.skin.FindStyle(styleName);
-            if (s != null && !trackedStyles.Contains(s))
-            {
-                trackedStyles.Add(s);
-                _customStyles.Add(new StyleInfo("custom." + styleName, s));
-            }
-        }
-
-        ApplyChanges();
+        _config["uitoolkit.globalFontSize"] = _uitoolkitFontSize;
+        WriteDictionary(_config, ConfigPath);
     }
 
-    void RepaintAllWindows()
+    private void ApplyChanges()
+    {
+        SaveConfig();
+        ApplyUIToolkitFontScalingDirect();
+        RepaintAllWindows();
+    }
+
+    /// <summary>
+    /// Bezpośrednie skalowanie w strukturze VisualElement (bez udziału pliku USS z dysku)
+    /// </summary>
+    private void ContinuousUIToolkitScale()
+    {
+        ApplyUIToolkitFontScalingDirect();
+    }
+
+    private void ApplyUIToolkitFontScalingDirect()
+    {
+        foreach (var window in Resources.FindObjectsOfTypeAll<EditorWindow>())
+        {
+            if (window == null || window.rootVisualElement == null) continue;
+
+            // Szybka zmiana stylu w głębi drzewa domyślnego dla elementów tekstowych
+            var labels = window.rootVisualElement.Query<Label>().Build();
+            foreach (var label in labels)
+            {
+                label.style.fontSize = _uitoolkitFontSize;
+            }
+
+            var buttons = window.rootVisualElement.Query<Button>().Build();
+            foreach (var btn in buttons)
+            {
+                btn.style.fontSize = _uitoolkitFontSize;
+            }
+
+            var textElements = window.rootVisualElement.Query(className: "unity-text-element").Build();
+            foreach (var txt in textElements)
+            {
+                txt.style.fontSize = _uitoolkitFontSize;
+            }
+        }
+    }
+
+    private static void RepaintAllWindows()
     {
         foreach (var w in Resources.FindObjectsOfTypeAll<EditorWindow>())
         {
@@ -256,27 +286,21 @@ public class EditorFontResizer : EditorWindow
         }
     }
 
-    void ApplyChanges()
-    {
-        WriteDictionary(_config, _configPath);
-        RepaintAllWindows();
-    }
-
-    bool Header(string name)
+    private bool Header(string name)
     {
         if (!_foldouts.ContainsKey(name))
         {
             _foldouts.Add(name, true);
         }
         GUILayout.Space(5);
-        var foldout = EditorGUILayout.Foldout(!_foldouts[name], name, true);
+        bool foldout = EditorGUILayout.Foldout(!_foldouts[name], name, true);
         _foldouts[name] = !foldout;
         return foldout;
     }
 
-    void FontSizeRow(StyleInfo styleInfo, bool even)
+    private void FontSizeRow(StyleInfo styleInfo, bool even)
     {
-        int delta = FontSizeRow(styleInfo.name, styleInfo.FontSize.ToString(), even ? _evenBG : _oddBG);
+        int delta = DrawRow(styleInfo.name, styleInfo.FontSize.ToString(), even ? _evenBG : _oddBG);
         if (delta != 0)
         {
             styleInfo.FontSize += delta;
@@ -284,66 +308,77 @@ public class EditorFontResizer : EditorWindow
         }
     }
 
-    int FontSizeRow(string name, string size, GUIStyle style)
+    private int DrawRow(string name, string size, GUIStyle style)
     {
-        var width = GUILayout.MaxWidth(Screen.width);
+        var width = GUILayout.MaxWidth(EditorGUIUtility.currentViewWidth);
         using (new GUILayout.HorizontalScope(style, width))
         {
             GUILayout.Label(name);
             GUILayout.FlexibleSpace();
 
-            if (GUILayout.Button("-", EditorStyles.miniButtonLeft))
-            {
-                return -1;
-            }
+            if (GUILayout.Button("-", EditorStyles.miniButtonLeft, GUILayout.Width(25))) return -1;
+
             using (new EditorGUI.DisabledGroupScope(true))
             {
-                GUILayout.Label(size, EditorStyles.miniButtonMid, GUILayout.Width(30));
+                GUILayout.Label(size, EditorStyles.miniButtonMid, GUILayout.Width(35));
             }
-            if (GUILayout.Button("+", EditorStyles.miniButtonRight))
-            {
-                return 1;
-            }
+
+            if (GUILayout.Button("+", EditorStyles.miniButtonRight, GUILayout.Width(25))) return 1;
         }
         return 0;
     }
 
-    void OnGUI()
+    private void OnGUI()
     {
         InitStyles();
-
-        // GUILayout.Label("Editor Font Resizer", EditorStyles.boldLabel, GUILayout.MaxWidth(Screen.width));
+        InitProperties();
 
         int rowCount = 0;
         using (var scope = new GUILayout.ScrollViewScope(_scroll))
         {
             _scroll = scope.scrollPosition;
 
-            if (GUILayout.Button("Reload Config", EditorStyles.miniButtonMid))
+            using (new GUILayout.HorizontalScope())
             {
-                _editorStyles = _guiStyles = _customStyles = null;
+                if (GUILayout.Button("Reload Config", EditorStyles.miniButtonLeft))
+                {
+                    _config = ReadDictionary(ConfigPath);
+                    _initialized = false;
+                    InitProperties();
+                    ApplyChanges();
+                }
+                if (GUILayout.Button("Force UI Toolkit Refresh", EditorStyles.miniButtonRight))
+                {
+                    ApplyUIToolkitFontScalingDirect();
+                }
             }
-            InitProperties();
 
-            int delta = FontSizeRow("Global Zoom", _config["editor.miniLabel"].ToString(), _oddBG);
-            if (delta != 0)
+            GUILayout.Space(8);
+
+            GUILayout.Label("Unity 6 (UI Toolkit Windows - Hierarchy/Project)", EditorStyles.boldLabel);
+            int uitDelta = DrawRow("UI Toolkit Hierarchy/Inspector Size", _uitoolkitFontSize.ToString(), _oddBG);
+            if (uitDelta != 0)
             {
-                foreach (var style in _editorStyles)
-                {
-                    style.FontSize += delta;
-                }
-                foreach (var style in _guiStyles)
-                {
-                    style.FontSize += delta;
-                }
-                foreach (var style in _customStyles)
-                {
-                    style.FontSize += delta;
-                }
+                _uitoolkitFontSize = Mathf.Max(8, _uitoolkitFontSize + uitDelta);
                 ApplyChanges();
             }
 
-            if (Header("Editor Styles"))
+            GUILayout.Space(10);
+            GUILayout.Label("Legacy IMGUI Styles", EditorStyles.boldLabel);
+
+            if (_config.ContainsKey("editor.miniLabel"))
+            {
+                int delta = DrawRow("Global IMGUI Zoom", _config["editor.miniLabel"].ToString(), _oddBG);
+                if (delta != 0)
+                {
+                    if (_editorStyles != null) foreach (var style in _editorStyles) style.FontSize += delta;
+                    if (_guiStyles != null) foreach (var style in _guiStyles) style.FontSize += delta;
+                    if (_customStyles != null) foreach (var style in _customStyles) style.FontSize += delta;
+                    ApplyChanges();
+                }
+            }
+
+            if (_editorStyles != null && Header("Editor Styles"))
             {
                 foreach (var style in _editorStyles)
                 {
@@ -351,7 +386,7 @@ public class EditorFontResizer : EditorWindow
                     ++rowCount;
                 }
             }
-            if (Header("GUI Skins"))
+            if (_guiStyles != null && Header("GUI Skins"))
             {
                 foreach (var style in _guiStyles)
                 {
@@ -359,7 +394,7 @@ public class EditorFontResizer : EditorWindow
                     ++rowCount;
                 }
             }
-            if (Header("Custom Styles"))
+            if (_customStyles != null && Header("Custom Styles"))
             {
                 foreach (var style in _customStyles)
                 {
